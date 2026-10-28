@@ -103,7 +103,7 @@ footer a { color: var(--accent); }
 </header>
 <div id="note" role="status"></div>
 <div id="map"></div>
-<footer><span>Map data as of 2026-10-27 -- refreshed nightly.</span>
+<footer><span>Map data as of 2026-10-28 -- refreshed nightly.</span>
   <span>Teleporters, sightings and NPCs are what one player's characters have walked through and seen; the art is the game's own.</span></footer>
 <script>
 "use strict";
@@ -181,7 +181,25 @@ function setWorld(m, view) {
     const width = $("map").clientWidth || 1000;
     st.map.setView([w.h / 2, w.w / 2], Math.max(w.min_zoom, Math.min(0, Math.floor(Math.log2(width / w.w)))), {animate: false});
   }
-  drawTeleporters(); drawHousing(); drawSeen();
+  drawAreas(); drawTeleporters(); drawHousing(); drawSeen();
+}
+// THE PLACES DRAWN WHOLE: a place drawn as the game draws it, laid flat on its own ground; its moongates by their own
+// art on their own tiles, sized as every teleporter's is. A click goes through to the map's own.
+function drawAreas() {
+  const g = st.groups.area; g.clearLayers();
+  const far = st.map.getZoom() < ART_ZOOM;
+  for (const a of st.areas || []) {
+    if (Number(a.map) !== st.world) continue;
+    const [x0, y0, x1, y1] = a.box;
+    L.imageOverlay(a.top, [[y0, x0], [y1 + 1, x1 + 1]], {interactive: false}).addTo(g);
+    if (far) continue;
+    for (const q of a.gates || []) {
+      const s = Math.min(1, 34 / Math.max(q.w, q.h));
+      const w = Math.max(8, Math.round(q.w * s)), h = Math.max(8, Math.round(q.h * s));
+      L.marker([q.y + .5, q.x + .5], {icon: L.icon({iconUrl: "art/" + q.file, iconSize: [w, h], iconAnchor: [w / 2, h / 2],
+                                                     className: "tpArt"}), keyboard: false, interactive: false}).addTo(g);
+    }
+  }
 }
 function drawTeleporters() {
   const g = st.groups.tp; g.clearLayers();
@@ -308,12 +326,13 @@ async function init() {
   try {
     [st.worlds, st.portals, st.regions, st.npcs, st.creatures, st.housing, st.library] = await Promise.all(
       ["worlds.json", "portals.json", "regions.json", "npcs.json", "sightings.json", "housing.json", "library.json"].map(load));
+    st.areas = await load("areas.json").catch(() => []);     // the places drawn whole -- none before the first build with them
   } catch (e) { note("The map's data did not load. Reload the page."); return; }
   st.libBook = {};
   for (const b of st.library) st.libBook[`${b.gate},${b.book}`] = b;
   const crs = L.extend({}, L.CRS.Simple, {transformation: new L.Transformation(1, 0, 1, 0)});
   st.map = L.map("map", {crs, minZoom: -5, maxZoom: 3, zoomSnap: 1, attributionControl: false, preferCanvas: true});
-  for (const k of ["house", "tp", "seen", "pick"]) st.groups[k] = L.layerGroup().addTo(st.map);
+  for (const k of ["area", "house", "tp", "seen", "pick"]) st.groups[k] = L.layerGroup().addTo(st.map);
   const Readout = L.Control.extend({onAdd() { return L.DomUtil.create("div", "readout"); }});
   const readout = new Readout({position: "bottomleft"}).addTo(st.map);
   st.map.on("mousemove", e => { readout.getContainer().textContent = `${worldName(st.world)} ${Math.floor(e.latlng.lng)}, ${Math.floor(e.latlng.lat)}`; });
@@ -323,7 +342,7 @@ async function init() {
   });
   st.map.on("moveend", writeHash);
   let lastFar = null;
-  st.map.on("zoomend", () => { const far = st.map.getZoom() < ART_ZOOM; if (far !== lastFar) { lastFar = far; drawTeleporters(); } });
+  st.map.on("zoomend", () => { const far = st.map.getZoom() < ART_ZOOM; if (far !== lastFar) { lastFar = far; drawTeleporters(); drawAreas(); } });
   for (const m of ORDER) {
     if (!st.worlds[String(m)]) continue;
     const b = el("button", "tab", worldName(m)); b.type = "button"; b.dataset.m = m;
