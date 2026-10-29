@@ -42,6 +42,9 @@ h1 { margin: 0; font: 600 19px/1.1 Cinzel, Georgia, serif; color: var(--title); 
 .hit .k { flex: none; width: 58px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
 .hit .k.creature { color: var(--bad); }
 .hit .k.npc { color: var(--title); }
+.hit .k.boss, .hit .k.champ { color: var(--bad); }
+.hit .k.key, .hit .k.altar { color: var(--good); }
+.hit .k.spot { color: var(--pick); }
 .hit .w { margin-left: auto; color: var(--muted); font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .empty { margin: 0; padding: 8px 12px; color: var(--muted); }
 .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 14px; color: var(--muted); }
@@ -81,13 +84,15 @@ footer a { color: var(--accent); }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
+<script data-goatcounter="https://omniwrath.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </head>
 <body>
 <header>
   <h1>Beyond Sosaria Map</h1>
   <div class="tabs" id="tabs" role="group" aria-label="World"></div>
   <div class="find">
-    <input id="q" type="search" placeholder="Find a town, dungeon, NPC or creature" autocomplete="off" aria-label="Search the map">
+    <input id="q" type="search" placeholder="Search anything or paste a screenshot" autocomplete="off" aria-label="Search the map"
+           title="Type a town, dungeon, NPC, creature, Peerless key, altar or champion spawn -- or coordinates (56°13'N 22°4'W, or 1097, 646).&#10;Or paste a screenshot (Ctrl+V) of an SoS message or of a treasure map with its coordinates showing: the coordinates are read from it.">
     <div id="results" hidden></div>
   </div>
   <div class="tools">
@@ -103,8 +108,9 @@ footer a { color: var(--accent); }
 </header>
 <div id="note" role="status"></div>
 <div id="map"></div>
-<footer><span>Map data as of 2026-10-28 -- refreshed nightly.</span>
-  <span>Teleporters, sightings and NPCs are what one player's characters have walked through and seen; the art is the game's own.</span></footer>
+<footer><span>Map data as of 2026-10-29 -- refreshed nightly.</span>
+  <span>Teleporters, sightings and NPCs are what one player's characters have walked through and seen; the art is the game's own.</span>
+  <span>We save the words typed into the search, and nothing else, to see what people look for and what the map is missing. No cookies, no accounts, nothing that says who you are.</span></footer>
 <script>
 "use strict";
 const ORDER = [1, 2, 3, 4, 5, 101];          // Felucca is not shown (the exporter leaves it out)
@@ -271,14 +277,215 @@ async function showCreature(c) {
   st.map.fitBounds(here.map(p => [p.y, p.x]), {padding: [40, 40], maxZoom: -1, animate: false});
   const worlds = [...new Set(places.map(p => worldName(p.map)))];
   note(`${c.name}: seen at ${places.length} place${places.length === 1 ? "" : "s"}` +
+       (c.tame != null ? ` (Animal Taming ${c.tame.toFixed(1)} to tame)` : "") +
        (worlds.length > 1 ? ` across ${worlds.join(", ")} -- showing ${worldName(st.world)}` : "") + ". Clear the search to hide them.");
 }
-function goTo(m, x, y, title, r) {
+function goTo(m, x, y, title, r, more) {
   if (m !== st.world) setWorld(m, null);
   st.map.setView([y, x], Math.max(st.map.getZoom(), -1), {animate: false});
   st.groups.pick.clearLayers();
   L.circleMarker([y + .5, x + .5], {radius: 6, color: "#f3d424", weight: 2, fill: false}).addTo(st.groups.pick);
-  popup(x, y, title || `${worldName(m)} ${x}, ${y}`, title ? [`${worldName(m)} ${x}, ${y}`] : [], r);
+  popup(x, y, title || `${worldName(m)} ${x}, ${y}`, (title ? [`${worldName(m)} ${x}, ${y}`] : []).concat(more || []), r);
+}
+// WHAT PEOPLE SEARCH FOR (owner, 2026-10-28: "can the public map track what people search for?" -- "including searches
+// with no returns?"): once typing rests 1.5 s, each term once a visit, to GoatCounter as an event -- search/hit/<term> or
+// search/miss/<term>. No counter on the page (none built with one): nothing is sent.
+const counted = new Set();
+let countTimer = null;
+function countSearch(q, found) {
+  clearTimeout(countTimer);
+  countTimer = setTimeout(() => {
+    const term = q.trim().toLowerCase().slice(0, 60), path = `search/${found ? "hit" : "miss"}/${term}`;
+    if (!term || counted.has(term) || !window.goatcounter || !window.goatcounter.count) return;
+    counted.add(term);
+    window.goatcounter.count({path, title: `${found ? "found" : "nothing for"}: ${term}`, event: true});
+  }, 1500);
+}
+// A SCREENSHOT PASTED INTO THE SEARCH (owner, 2026-10-28: "let users paste a screenshot of their map coordinates or SoS into
+// the search field"): read in the browser by Tesseract.js (loaded only on the first paste), then searched as typed. The
+// game's font reads its degree mark "o" as a 0 -- "1600 34'S" is read back as 160o 34'S.
+let ocrWorker = null;
+async function readScreenshot(blob) {
+  note("Reading the screenshot...");
+  try {
+    if (!window.Tesseract) {
+      await new Promise((ok, fail) => {
+        const sc = document.createElement("script");
+        sc.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+        sc.onload = ok; sc.onerror = fail; document.head.append(sc);
+      });
+    }
+    ocrWorker = ocrWorker || await Tesseract.createWorker("eng");
+    const text = (await ocrWorker.recognize(blob)).data.text || "";
+    const found = coordsIn(text) || coordsIn(await readGameFont(blob));   // THE GAME'S OWN LETTERS next
+    if (!found) { note("No coordinates found in that screenshot -- type them in instead."); return; }
+    $("q").value = found;
+    note("Read from the screenshot: " + found);
+    const spot = spotOf(found);
+    const by = spot ? await rankFacets(blob, spot) : null;    // THE FACET BY ITS GROUND
+    st.facetScores = by ? {label: spot.label, by} : null;
+    search(found);
+  } catch (e) {
+    note("The screenshot could not be read here -- type the coordinates in instead.");
+  }
+}
+// THE GAME'S OWN LETTERS: an SoS's message is the client's Unicode font 1 (data/unifont1.json). The screenshot's dark text
+// is cut into lines (rows with ink) and letters (columns with ink); each letter is matched to the glyph whose shape, scaled
+// to the letter's size, overlaps it best -- its height in the line counted too, so an apostrophe and a comma differ.
+let font1 = null;
+async function readGameFont(blob) {
+  try {
+    font1 = font1 || await load("unifont1.json");
+    const img = await createImageBitmap(blob);
+    const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
+    const g = c.getContext("2d"); g.drawImage(img, 0, 0);
+    const px = g.getImageData(0, 0, c.width, c.height).data, W = c.width, H = c.height;
+    // the page the text is on: the rows and columns that are mostly light (the parchment), a margin in from its edges
+    const lum = i => (px[i * 4] + px[i * 4 + 1] + px[i * 4 + 2]) / 3;
+    const lightRow = y => { let n = 0; for (let x = 0; x < W; x++) n += lum(y * W + x) > 130; return n > W * 0.5; };
+    const lightCol = x => { let n = 0; for (let y = 0; y < H; y++) n += lum(y * W + x) > 130; return n > H * 0.5; };
+    let y0 = 0, y1 = H - 1, x0 = 0, x1 = W - 1;
+    while (y0 < H && !lightRow(y0)) y0++;
+    while (y1 > y0 && !lightRow(y1)) y1--;
+    while (x0 < W && !lightCol(x0)) x0++;
+    while (x1 > x0 && !lightCol(x1)) x1--;
+    const m = 4;
+    const ink = new Uint8Array(W * H);
+    for (let y = y0 + m; y <= y1 - m; y++) for (let x = x0 + m; x <= x1 - m; x++) ink[y * W + x] = lum(y * W + x) < 96 ? 1 : 0;
+    const rowInk = y => { let n = 0; for (let x = 0; x < W; x++) n += ink[y * W + x]; return n; };
+    const bands = [];
+    for (let y = 0, top = -1; y <= H; y++) {
+      const on = y < H && rowInk(y) > 0;
+      if (on && top < 0) top = y;
+      if (!on && top >= 0) { if (y - top >= 4) bands.push([top, y]); top = -1; }
+    }
+    const glyphs = Object.entries(font1).filter(([, v]) => v[2] > 0 && v[3] > 0);
+    const lines = [], coords = [];                     // every letter, and the reading's letters only
+    const COORD = new Set("0123456789o'NSEW,.");
+    for (const [t, b] of bands) {
+      const colInk = x => { for (let y = t; y < b; y++) if (ink[y * W + x]) return true; return false; };
+      const cuts = [];
+      for (let x = 0, l = -1; x <= W; x++) {
+        const on = x < W && colInk(x);
+        if (on && l < 0) l = x;
+        if (!on && l >= 0) { cuts.push([l, x]); l = -1; }
+      }
+      if (!cuts.length) continue;
+      const lh = b - t, scale = lh / 14;               // the font's line: 14 rows from the top of a digit to a comma's foot
+      let out = "", only = "", prev = null;
+      for (const [l, r] of cuts) {
+        let ct = b, cb = t;
+        for (let y = t; y < b; y++) for (let x = l; x < r; x++) if (ink[y * W + x]) { ct = Math.min(ct, y); cb = Math.max(cb, y + 1); }
+        if (prev !== null && l - prev > 3 * scale) { out += " "; only += " "; }
+        prev = r;
+        const cw = r - l, chh = cb - ct;
+        let best = null, bestC = null;
+        for (const [ch, [, yo, gw, gh, rows]] of glyphs) {
+          let hit = 0, all = 0;
+          for (let y = 0; y < chh; y++) for (let x = 0; x < cw; x++) {
+            const gy = Math.min(gh - 1, Math.floor(y * gh / chh)), gx = Math.min(gw - 1, Math.floor(x * gw / cw));
+            const a1 = ink[(ct + y) * W + l + x], a2 = rows[gy][gx] === "1" ? 1 : 0;
+            if (a1 || a2) { all++; if (a1 && a2) hit++; }
+          }
+          const shape = all ? hit / all : 0;
+          const aspect = Math.abs(cw / chh - gw / gh);
+          const place = Math.abs((ct - t) / lh - yo / 14) + Math.abs(chh / lh - gh / 14);
+          const score = shape - 0.35 * aspect - 0.8 * place;
+          if (!best || score > best[1]) best = [ch, score];
+          if (COORD.has(ch) && (!bestC || score > bestC[1])) bestC = [ch, score];
+        }
+        out += best ? best[0] : "?";
+        only += bestC ? bestC[0] : "?";
+      }
+      lines.push(out);
+      coords.push(only);
+    }
+    return lines.join("\n") + "\n" + coords.join("\n");
+  } catch (e) {
+    return "";
+  }
+}
+// A SPOT FROM WHAT WAS TYPED: a sextant reading (56°13'N 22°4'W -- ServUO's Sextant.ReverseLookup(), from Lord British's
+// throne (1323, 1624), 360 degrees across 5120 x 4096 tiles) or the tiles ("1097, 646", "Estimated loc: 1097, 646" -- TazUO's
+// treasure map tooltip); {x, y, label, sx} or null. Neither names a world.
+function spotOf(q) {
+  const sx = q.match(/(\d{1,3})\s*(?:°|o|deg|\s)\s*(\d{1,2})\s*'?\s*([ns])[\s,;]+(\d{1,3})\s*(?:°|o|deg|\s)\s*(\d{1,2})\s*'?\s*([ew])/i);
+  const tl = sx ? null : q.match(/^\s*(?:[a-z ]*loc[a-z]*\s*:)?\s*(\d{1,4})\s*[, ]\s*(\d{1,4})\s*$/i);
+  if (sx) {
+    let lat = +sx[1] + sx[2] / 60, lon = +sx[4] + sx[5] / 60;
+    if (sx[6].toLowerCase() === "w") lon = 360 - lon;
+    if (sx[3].toLowerCase() === "n") lat = 360 - lat;
+    return {x: (1323 + Math.trunc(lon * 5120 / 360)) % 5120, y: (1624 + Math.trunc(lat * 4096 / 360)) % 4096, sx: true,
+            label: `${sx[1]}°${sx[2]}'${sx[3].toUpperCase()} ${sx[4]}°${sx[5]}'${sx[6].toUpperCase()}`};
+  }
+  return tl ? {x: +tl[1], y: +tl[2], label: `${+tl[1]}, ${+tl[2]}`, sx: false} : null;
+}
+// THE FACET BY ITS GROUND (owner, 2026-10-28: "it doesn't tell you the facet by default for the treasure map"): a treasure
+// map's picture is its world's ground in the client's radar colours -- ours too (map_tiles.py, radarcol.mul). ServUO's
+// window is 300 x 300 tiles (200 in Ter Mur) with the chest inside it; each world the spot fits is drawn that size around
+// it from our tiles, and its colour mix is set against the middle of the picture. st.facetScores ranks the spots.
+const FACET_GRID = 12, FACET_INNER = 0.76;           // the picture's middle 76%, as a 12 x 12 grid of mean colours
+function colourGrid(g, x, y, w, h) {
+  const d = g.getImageData(x, y, w, h).data, out = [];
+  for (let gy = 0; gy < FACET_GRID; gy++) for (let gx = 0; gx < FACET_GRID; gx++) {
+    let r = 0, gg = 0, b = 0, n = 0;
+    for (let yy = Math.floor(gy * h / FACET_GRID); yy < Math.floor((gy + 1) * h / FACET_GRID); yy++)
+      for (let xx = Math.floor(gx * w / FACET_GRID); xx < Math.floor((gx + 1) * w / FACET_GRID); xx++) {
+        const i = (yy * w + xx) * 4;
+        if (d[i] + d[i + 1] + d[i + 2] < 24) continue;   // nothing drawn (beyond the map's edge)
+        r += d[i]; gg += d[i + 1]; b += d[i + 2]; n++;
+      }
+    out.push(n ? [r / n, gg / n, b / n] : null);
+  }
+  return out;
+}
+async function rankFacets(blob, spot) {
+  try {
+    const img = await createImageBitmap(blob);
+    const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
+    const g = c.getContext("2d"); g.drawImage(img, 0, 0);
+    const iw = Math.round(img.width * FACET_INNER), ih = Math.round(img.height * FACET_INNER);
+    const shot = colourGrid(g, Math.round((img.width - iw) / 2), Math.round((img.height - ih) / 2), iw, ih);
+    const by = {};
+    for (const [m, w] of Object.entries(st.worlds).filter(([, w]) => spot.x < w.w && spot.y < w.h)) {
+      // ServUO's window: 300 tiles (200 in Ter Mur), the chest anywhere in its middle half -- so the window slides
+      const half = w.world === "TerMur" ? 100 : 150, slide = half / 2, size = 2 * (half + slide), t = w.tile || 256;
+      const wc = document.createElement("canvas"); wc.width = size; wc.height = size;
+      const wg = wc.getContext("2d", {willReadFrequently: true});
+      const x0 = spot.x - half - slide, y0 = spot.y - half - slide;
+      const tiles = [];
+      for (let tx = Math.floor(Math.max(0, x0) / t); tx <= Math.floor(Math.min(w.w - 1, x0 + size) / t); tx++)
+        for (let ty = Math.floor(Math.max(0, y0) / t); ty <= Math.floor(Math.min(w.h - 1, y0 + size) / t); ty++)
+          tiles.push(new Promise(ok => { const im = new Image(); im.onload = () => { wg.drawImage(im, tx * t - x0, ty * t - y0); ok(); };
+                                          im.onerror = ok; im.src = `tiles/${w.tiles}/0/${tx}_${ty}.png`; }));
+      await Promise.all(tiles);
+      const inner = Math.round(2 * half * FACET_INNER), step = Math.max(5, Math.round(slide / 5));
+      let best = -1;
+      for (let oy = 0; oy <= 2 * slide; oy += step) for (let ox = 0; ox <= 2 * slide; ox += step) {
+        const ours = colourGrid(wg, ox + half - inner / 2, oy + half - inner / 2, inner, inner);
+        let diff = 0, n = 0;
+        for (let i = 0; i < ours.length; i++) {
+          if (!ours[i] || !shot[i]) continue;
+          diff += Math.abs(ours[i][0] - shot[i][0]) + Math.abs(ours[i][1] - shot[i][1]) + Math.abs(ours[i][2] - shot[i][2]);
+          n++;
+        }
+        if (n < ours.length / 2) continue;               // mostly beyond the map's edge: no match
+        best = Math.max(best, 1 - diff / n / 765);
+      }
+      by[m] = best;
+    }
+    return by;
+  } catch (e) {
+    return null;
+  }
+}
+function coordsIn(text) {
+  const t = text.replace(/[°º]/g, "o").replace(/(\d{2,3})0(?=\s+\d{1,2}\s*['’`]\s*[NnSs])/g, "$1o")
+                .replace(/(\d{2,3})0(?=\s+\d{1,2}\s*['’`]\s*[EeWw])/g, "$1o");
+  const sx = t.match(/(\d{1,3})\s*o\s*(\d{1,2})\s*['’`]?\s*([NnSs])[\s,;.]+(\d{1,3})\s*o\s*(\d{1,2})\s*['’`]?\s*([EeWw])/);
+  if (sx) return `${sx[1]}o ${sx[2]}'${sx[3].toUpperCase()} ${sx[4]}o ${sx[5]}'${sx[6].toUpperCase()}`;
+  const loc = t.match(/loc[a-z]*\s*:\s*(\d{1,4})\s*,\s*(\d{1,4})/i);
+  return loc ? `${loc[1]}, ${loc[2]}` : null;
 }
 function search(q) {
   const box = $("results");
@@ -296,13 +503,40 @@ function search(q) {
     const [x1, y1, x2, y2] = r.boxes.reduce((a, b) => ((b[2] - b[0]) * (b[3] - b[1]) > (a[2] - a[0]) * (a[3] - a[1]) ? b : a));
     out.push({k: "place", name: r.name, w: `${worldName(r.map)}`, go: () => goTo(r.map, (x1 + x2) >> 1, (y1 + y2) >> 1, r.name)});
   }
+  // THE MAP'S GUIDE: every name an entry goes by, apostrophes or not ("gnaws fang" finds Gnaw's Fang)
+  const bare = s => s.toLowerCase().replace(/['’`]/g, "").replace(/\s+/g, " ").trim(), qb = bare(q);
+  const guideHits = (st.guide || []).filter(g => g.names.some(n => bare(n).includes(qb)))
+    .sort((a, b) => (a.names.some(n => bare(n).startsWith(qb)) ? 0 : 1) - (b.names.some(n => bare(n).startsWith(qb)) ? 0 : 1)
+                    || a.name.length - b.name.length).slice(0, 8);
+  // THE SEXTANT: a treasure map's or an SoS bottle's reading (56°13'N 22°4'W) -- ServUO's Sextant.ReverseLookup(), from
+  // Lord British's throne (1323, 1624), 360 degrees across 5120 x 4096 tiles; one answer in each world it fits
+  const spot = spotOf(q);
+  if (spot) {
+    const {x, y, label, sx} = spot;
+    // THE FACET BY ITS GROUND: a pasted treasure map ranked the worlds by how its picture's colours match ours there
+    const fit = Object.entries(st.worlds).filter(([, w]) => x < w.w && y < w.h);
+    const sc = st.facetScores && st.facetScores.label === label ? st.facetScores.by : null;
+    if (sc) fit.sort((a, b) => (sc[b[0]] || 0) - (sc[a[0]] || 0));
+    fit.forEach(([m], i) => {
+      const likely = sc && i === 0 && fit.length > 1;
+      out.push({k: "spot", name: label + (likely ? " -- likeliest world" : ""), w: `${worldName(m)} ${x}, ${y}`,
+                go: () => goTo(+m, x, y, label, null, [sx ? "A sextant reading -- a treasure map, an SoS bottle"
+                                                          : "A spot by its tiles -- each world it fits",
+                                                       likely ? "The screenshot's ground matches this world best" : ""])});
+    });
+  }
+  for (const g of guideHits) {
+    out.push({k: g.k, name: g.name, w: `${worldName(g.map)} ${g.x}, ${g.y}`, go: () => goTo(g.map, g.x, g.y, g.name, null, [g.detail])});
+  }
   for (const n of st.npcs.filter(n => n.name.toLowerCase().includes(q)).sort(by).slice(0, 8)) {
     out.push({k: "npc", name: n.name, w: `${worldName(n.map)} ${n.x}, ${n.y}`, go: () => goTo(n.map, n.x, n.y, n.name, n.r)});
   }
   for (const c of st.creatures.filter(c => c.name.includes(q)).sort(by).slice(0, 8)) {
-    out.push({k: "creature", name: c.name, w: `${c.places} place${c.places === 1 ? "" : "s"}`, go: () => showCreature(c)});
+    out.push({k: "creature", name: c.name, w: `${c.places} place${c.places === 1 ? "" : "s"}` +
+              (c.tame != null ? ` · tame ${c.tame.toFixed(1)}` : ""), go: () => showCreature(c)});
   }
   box.hidden = false;
+  countSearch(q, out.length);
   if (!out.length) { box.replaceChildren(el("p", "empty", "Nothing by that name.")); return; }
   box.replaceChildren(...out.map(r => {
     const b = el("button", "hit"); b.type = "button";
@@ -327,6 +561,7 @@ async function init() {
     [st.worlds, st.portals, st.regions, st.npcs, st.creatures, st.housing, st.library] = await Promise.all(
       ["worlds.json", "portals.json", "regions.json", "npcs.json", "sightings.json", "housing.json", "library.json"].map(load));
     st.areas = await load("areas.json").catch(() => []);     // the places drawn whole -- none before the first build with them
+    st.guide = await load("guide.json").catch(() => []);     // the Peerless, their keys, the altars, the champion spawns
   } catch (e) { note("The map's data did not load. Reload the page."); return; }
   st.libBook = {};
   for (const b of st.library) st.libBook[`${b.gate},${b.book}`] = b;
@@ -354,6 +589,12 @@ async function init() {
   let typing = 0;
   $("q").oninput = ev => { clearTimeout(typing); typing = setTimeout(() => search(ev.target.value), 200); };
   $("q").onkeydown = ev => { if (ev.key === "Escape") { ev.target.value = ""; search(""); } };
+  $("q").onpaste = ev => {
+    const file = [...(ev.clipboardData && ev.clipboardData.items || [])].find(i => i.type.startsWith("image/"));
+    if (!file) return;                                  // text pastes as text
+    ev.preventDefault();
+    readScreenshot(file.getAsFile());
+  };
   $("coords").onsubmit = ev => {
     ev.preventDefault();
     const x = parseInt($("cx").value, 10), y = parseInt($("cy").value, 10);
