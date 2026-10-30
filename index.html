@@ -97,6 +97,7 @@ footer a { color: var(--accent); }
   </div>
   <div class="tools">
     <label><input type="checkbox" id="layerTp" checked> Teleporters</label>
+    <label><input type="checkbox" id="layerLib"> Library runes</label>
     <label>Housing plots
       <select id="layerHouse" aria-label="Housing plot size">
         <option value="0">off</option><option value="7">7x7</option><option value="11">11x11</option>
@@ -108,7 +109,7 @@ footer a { color: var(--accent); }
 </header>
 <div id="note" role="status"></div>
 <div id="map"></div>
-<footer><span>Map data as of 2026-10-29 -- refreshed nightly.</span>
+<footer><span>Map data as of 2026-10-30 -- refreshed nightly.</span>
   <span>Teleporters, sightings and NPCs are what one player's characters have walked through and seen; the art is the game's own.</span>
   <span>We save the words typed into the search, and nothing else, to see what people look for and what the map is missing. No cookies, no accounts, nothing that says who you are.</span></footer>
 <script>
@@ -145,6 +146,18 @@ function runeLine(r) {
   return `gate ${b.gate}, ${b.page ? `page ${b.page}, ` : ""}${q[4] || `(${q[1]}, ${q[2]}, ${q[3]})`}` +
     (b.page ? "" : " (its book is not in the gate yet)");
 }
+// THE BOTTLE'S LAUNCH (owner, 2026-10-29: "specific to the public map and the rune library"): data/launches.json names, for
+// each 8 x 8 square of sea, the launch nearest it by sail that a Rune Library rune walks to (StatusReport/sos_launch.py) --
+// [x, y, gate, book, slot, steps from the rune] -- or null on land and where no such launch reaches
+async function launchAt(m, x, y) {
+  let d;
+  try { d = await load("launches.json"); } catch (e) { return null; }
+  const w = d && d.worlds && d.worlds[String(m)];
+  if (!w) return null;
+  const cx = Math.floor(x / d.cell), cy = Math.floor(y / d.cell);
+  const r = w.runs.find(r => r[0] === cy && r[1] <= cx && cx < r[1] + r[2]);
+  return r ? w.launches[r[3]] : null;
+}
 function popup(x, y, title, lines, r) {
   const box = el("div", "pop");
   box.append(el("div", "t", title));
@@ -155,17 +168,36 @@ function popup(x, y, title, lines, r) {
   // Moongate Library lists them
   const books = libraryAt(st.world, x, y);
   const near = r ? runeLine(r) : "";
+  const lib = el("div", "s lib");
   if (near) {
-    const lib = el("div", "s lib");
     lib.append(el("span", "lk", "Rune Library"), " " + near);
-    box.append(lib);
   } else if (books.length) {
-    const lib = el("div", "s lib");
     lib.append(el("span", "lk", "Rune Library"), " " + books.map(b => `gate ${b.gate}${b.page ? `, page ${b.page}` : ""}, “${b.title}”` +
       (b.marked < b.n ? ` (${b.marked} of ${b.n} runes in so far)` : "")).join(" · "));
-    box.append(lib);
   }
+  box.append(lib);
+  // THE RUNE FOR ANY SPOT: a spot that came without one is asked of data/reach/<world>.json
+  if (!near) runeAt(st.world, x, y).then(rr => {
+    const line = rr ? runeLine(rr) : "";
+    if (line) lib.replaceChildren(el("span", "lk", "Rune Library"), ` ${line} -- the nearest rune by walk`);
+  });
   L.popup({maxWidth: 320}).setLatLng([y + .5, x + .5]).setContent(box).openOn(st.map);
+}
+// THE RUNE FOR ANY SPOT (owner, 2026-10-29: "The go there feature gets replaced with a function telling the user which rune
+// to use from the library"): data/reach/<world>.json names, for every 4 x 4 square a library rune walks to within 80
+// steps, the rune that walks there in the fewest (public_map.library_reach(), THE RUNE TO RECALL TO) -- {"cell", "runes":
+// [[gate, book, slot]], "runs": [[row, column, length, rune index]]}; null where no library rune walks
+const reachRows = {};
+async function runeAt(m, x, y) {
+  let d;
+  try { d = await load(`reach/${m}.json`); } catch (e) { return null; }
+  if (!reachRows[m]) {
+    const rows = reachRows[m] = {};
+    for (const r of d.runs) (rows[r[0]] = rows[r[0]] || []).push(r);
+  }
+  const cx = Math.floor(x / d.cell), cy = Math.floor(y / d.cell);
+  const r = (reachRows[m][cy] || []).find(r => r[1] <= cx && cx < r[1] + r[2]);
+  return r ? d.runes[r[3]] : null;
 }
 function setWorld(m, view) {
   const w = st.worlds[String(m)];
@@ -187,7 +219,7 @@ function setWorld(m, view) {
     const width = $("map").clientWidth || 1000;
     st.map.setView([w.h / 2, w.w / 2], Math.max(w.min_zoom, Math.min(0, Math.floor(Math.log2(width / w.w)))), {animate: false});
   }
-  drawAreas(); drawTeleporters(); drawHousing(); drawSeen();
+  drawAreas(); drawTeleporters(); drawHousing(); drawLibrary(); drawSeen();
 }
 // THE PLACES DRAWN WHOLE: a place drawn as the game draws it, laid flat on its own ground; its moongates by their own
 // art on their own tiles, sized as every teleporter's is. A click goes through to the map's own.
@@ -236,6 +268,25 @@ function drawTeleporters() {
         p.cond ? "Needs: " + p.cond : "", p.use && p.use !== "step" ? "Use: " + p.use : ""]);
     }).addTo(g);
   }
+}
+// THE LIBRARY'S RUNES (owner, 2026-10-29: "Yes. Do that."): every Rune Library rune of this world as a dot -- the public
+// map's own Runes layer (the panel's shows our book's); a dot's popup names its gate, page and rune
+function drawLibrary() {
+  const g = st.groups.lib; g.clearLayers();
+  if (!$("layerLib").checked) return;
+  let n = 0;
+  const r = st.map.getZoom() <= -3 ? 1 : st.map.getZoom() <= -1 ? 2 : 4;   // a dot, not a blot, on the whole world
+  for (const b of st.library) {
+    if (b.map !== st.world) continue;
+    for (const q of b.runes) {
+      n++;
+      L.circleMarker([q[2] + .5, q[1] + .5], {radius: r, color: "#c99bff", weight: r > 1 ? 1 : 0, fillOpacity: .8}).on("click", ev => {
+        L.DomEvent.stopPropagation(ev);
+        popup(q[1], q[2], "Library rune", [`${worldName(b.map)} ${q[1]}, ${q[2]}`, `“${b.title}”`], [b.gate, b.book, q[0]]);
+      }).addTo(g);
+    }
+  }
+  note(`${n} Rune Library rune${n === 1 ? "" : "s"} in ${worldName(st.world)}.`);
 }
 function drawHousing() {
   const g = st.groups.house; g.clearLayers();
@@ -520,9 +571,17 @@ function search(q) {
     fit.forEach(([m], i) => {
       const likely = sc && i === 0 && fit.length > 1;
       out.push({k: "spot", name: label + (likely ? " -- likeliest world" : ""), w: `${worldName(m)} ${x}, ${y}`,
-                go: () => goTo(+m, x, y, label, null, [sx ? "A sextant reading -- a treasure map, an SoS bottle"
-                                                          : "A spot by its tiles -- each world it fits",
-                                                       likely ? "The screenshot's ground matches this world best" : ""])});
+                go: async () => {
+                  const more = [sx ? "A sextant reading -- a treasure map, an SoS bottle" : "A spot by its tiles -- each world it fits",
+                                likely ? "The screenshot's ground matches this world best" : ""];
+                  // THE BOTTLE'S LAUNCH: a spot at sea names where to set sail and the library rune for it
+                  const l = await launchAt(+m, x, y), rune = l ? runeLine([l[2], l[3], l[4]]) : "";
+                  if (l && rune) more.push(`Set sail from ${l[0]}, ${l[1]} -- Rune Library ${rune}` +
+                                           (l[5] != null ? `, then ${l[5]} steps to the shore` : ""));
+                  goTo(+m, x, y, label, null, more);
+                  if (l && rune) L.circleMarker([l[1] + .5, l[0] + .5], {radius: 5, color: "#3fb6c9", weight: 2, fill: false})
+                    .bindTooltip("Set sail here").addTo(st.groups.pick);
+                }});
     });
   }
   for (const g of guideHits) {
@@ -530,6 +589,11 @@ function search(q) {
   }
   for (const n of st.npcs.filter(n => n.name.toLowerCase().includes(q)).sort(by).slice(0, 8)) {
     out.push({k: "npc", name: n.name, w: `${worldName(n.map)} ${n.x}, ${n.y}`, go: () => goTo(n.map, n.x, n.y, n.name, n.r)});
+  }
+  // NPCS BY ROLE (the panel's since 10-28; the public map's since the audit, 2026-10-29): "scribe", "banker" -- the vendors
+  // whose title we read by name, then ServUO's vendor spawners of the trade with the names seen there
+  for (const v of (st.roles || []).filter(v => v.title.includes(q)).slice(0, 8)) {
+    out.push({k: "npc", name: v.name, w: `${worldName(v.map)} ${v.x}, ${v.y}`, go: () => goTo(v.map, v.x, v.y, v.name, null, [v.detail])});
   }
   for (const c of st.creatures.filter(c => c.name.includes(q)).sort(by).slice(0, 8)) {
     out.push({k: "creature", name: c.name, w: `${c.places} place${c.places === 1 ? "" : "s"}` +
@@ -562,12 +626,13 @@ async function init() {
       ["worlds.json", "portals.json", "regions.json", "npcs.json", "sightings.json", "housing.json", "library.json"].map(load));
     st.areas = await load("areas.json").catch(() => []);     // the places drawn whole -- none before the first build with them
     st.guide = await load("guide.json").catch(() => []);     // the Peerless, their keys, the altars, the champion spawns
+    st.roles = await load("roles.json").catch(() => []);     // NPCS BY ROLE: the vendors by their trade's title
   } catch (e) { note("The map's data did not load. Reload the page."); return; }
   st.libBook = {};
   for (const b of st.library) st.libBook[`${b.gate},${b.book}`] = b;
   const crs = L.extend({}, L.CRS.Simple, {transformation: new L.Transformation(1, 0, 1, 0)});
   st.map = L.map("map", {crs, minZoom: -5, maxZoom: 3, zoomSnap: 1, attributionControl: false, preferCanvas: true});
-  for (const k of ["area", "house", "tp", "seen", "pick"]) st.groups[k] = L.layerGroup().addTo(st.map);
+  for (const k of ["area", "house", "tp", "lib", "seen", "pick"]) st.groups[k] = L.layerGroup().addTo(st.map);
   const Readout = L.Control.extend({onAdd() { return L.DomUtil.create("div", "readout"); }});
   const readout = new Readout({position: "bottomleft"}).addTo(st.map);
   st.map.on("mousemove", e => { readout.getContainer().textContent = `${worldName(st.world)} ${Math.floor(e.latlng.lng)}, ${Math.floor(e.latlng.lat)}`; });
@@ -585,6 +650,8 @@ async function init() {
     $("tabs").append(b);
   }
   $("layerTp").onchange = drawTeleporters;
+  $("layerLib").onchange = () => { if (!$("layerLib").checked) note(""); drawLibrary(); };
+  st.map.on("zoomend", () => { if ($("layerLib").checked) drawLibrary(); });
   $("layerHouse").onchange = () => { if (!(parseInt($("layerHouse").value, 10) || 0)) note(""); drawHousing(); };
   let typing = 0;
   $("q").oninput = ev => { clearTimeout(typing); typing = setTimeout(() => search(ev.target.value), 200); };
